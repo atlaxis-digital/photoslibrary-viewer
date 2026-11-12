@@ -232,3 +232,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   .count { display: none; }
   .search { width: 46vw; }
 }
+
+/* ---------- fullscreen ---------- */
+.fs-btn .fs-exit { display: none; }
+:fullscreen .fs-btn .fs-enter, .is-fs .fs-btn .fs-enter { display: none; }
+:fullscreen .fs-btn .fs-exit, .is-fs .fs-btn .fs-exit { display: inline; }
+.no-fullscreen .fs-btn { display: none; }
+.lightbox:fullscreen { background: #000; }
+.lightbox.fs.idle { cursor: none; }

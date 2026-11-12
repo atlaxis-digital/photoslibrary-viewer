@@ -415,6 +415,27 @@ function showPeopleGrid() {
     h("h3", {}, p.name), h("p", {}, T.items(p.count)))));
 }
 
+// ------------------------------------------------------------------ fullscreen
+// The lightbox goes fullscreen on its own; outside it the whole app does.
+const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+function toggleFullscreen(target) {
+  if (fsElement()) {
+    Promise.resolve((document.exitFullscreen || document.webkitExitFullscreen).call(document)).catch(() => {});
+    return;
+  }
+  const el = target || document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (req) Promise.resolve(req.call(el)).catch(() => {});
+}
+const onFsChange = () => {
+  lb.root.classList.toggle("fs", fsElement() === lb.root);
+  document.documentElement.classList.toggle("is-fs", !!fsElement());
+  poke();
+};
+document.addEventListener("fullscreenchange", onFsChange);
+document.addEventListener("webkitfullscreenchange", onFsChange);
+
 // ------------------------------------------------------------------ lightbox
 const lb = {
   root: $("lightbox"), img: $("lbImg"), video: $("lbVideo"), live: $("lbLive"), msg: $("lbMsg"),
@@ -482,6 +503,7 @@ function openLightbox(i, push = true) {
 
 function closeLightbox(pop = true) {
   if (lb.root.hidden) return;
+  if (fsElement() === lb.root) toggleFullscreen();
   lb.token++;
   lb.video.pause(); lb.video.removeAttribute("src"); lb.video.load();
   stopLive();
@@ -633,6 +655,10 @@ function bindUi() {
   $("lbPrev").addEventListener("click", () => step(-1));
   $("lbNext").addEventListener("click", () => step(1));
   $("lbInfoBtn").addEventListener("click", toggleInfo);
+  if (!canFullscreen) document.documentElement.classList.add("no-fullscreen");
+  $("lbFullBtn").addEventListener("click", () => toggleFullscreen(lb.root));
+  $("fullBtn").addEventListener("click", () => toggleFullscreen());
+  $("lbStage").addEventListener("dblclick", e => { if (e.target !== lb.video && canFullscreen) toggleFullscreen(lb.root); });
   lb.liveBtn.addEventListener("click", () => (lb.live.hidden ? playLive() : stopLive()));
   lb.root.addEventListener("mousemove", poke);
   lb.info.addEventListener("click", e => { if (e.target.closest("a[href^='#']")) closeLightbox(false); });
@@ -656,6 +682,7 @@ function bindUi() {
   document.addEventListener("keydown", e => {
     if (lb.root.hidden) {
       if (e.key === "/" && document.activeElement !== els.search) { e.preventDefault(); els.search.focus(); }
+      else if ((e.key === "f" || e.key === "F") && document.activeElement !== els.search && canFullscreen) toggleFullscreen();
       return;
     }
     if (e.target === els.search) return;
@@ -664,6 +691,7 @@ function bindUi() {
       case "ArrowLeft": step(-1); break;
       case "Escape": closeLightbox(); break;
       case "i": toggleInfo(); break;
+      case "f": case "F": if (canFullscreen) toggleFullscreen(lb.root); break;
       case " ":
         if (!lb.video.hidden) { e.preventDefault(); lb.video.paused ? lb.video.play() : lb.video.pause(); }
         else if (!lb.liveBtn.hidden) { e.preventDefault(); lb.live.hidden ? playLive() : stopLive(); }

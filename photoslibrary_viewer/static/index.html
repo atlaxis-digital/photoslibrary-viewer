@@ -45,6 +45,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
         <input id="zoom" type="range" min="80" max="320" step="10" value="160">
       </label>
+      <button class="icon-btn fs-btn" id="fullBtn" aria-label="Fullscreen" title="Fullscreen (F)"><svg viewBox="0 0 24 24"><path class="fs-enter" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="fs-exit" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>
     </header>
     <div class="scroller" id="scroller">
       <div class="canvas" id="canvas"></div>
@@ -68,6 +69,7 @@
     <div class="lb-caption"><strong id="lbDate"></strong><span id="lbSub"></span></div>
     <button class="chip-btn" id="lbLiveBtn" hidden>LIVE</button>
     <a class="icon-btn" id="lbDownload" aria-label="Download original" download><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></a>
+    <button class="icon-btn fs-btn" id="lbFullBtn" aria-label="Fullscreen" title="Fullscreen (F)"><svg viewBox="0 0 24 24"><path class="fs-enter" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="fs-exit" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>
     <button class="icon-btn" id="lbInfoBtn" aria-label="Info"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
   </div>
   <button class="lb-nav prev" id="lbPrev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>

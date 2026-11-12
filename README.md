@@ -27,7 +27,9 @@ library.
   location (OpenStreetMap link), albums, people and keywords
 - **Search** across file names, titles, captions, keywords, album names and
   people
-- Keyboard (← → Esc `i` Space `/`), swipe gestures, light and dark mode,
+- **Fullscreen** for the whole app or a single photo/video (button, `F` or
+  double-click)
+- Keyboard (← → Esc `F` `i` Space `/`), swipe gestures, light and dark mode,
   English and German UI
 - **Installable as an app** in Chrome, Edge and on iOS/Android home screens
 - Optional HTTP Basic auth
