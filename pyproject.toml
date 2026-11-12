@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photoslibrary-viewer"
+dynamic = ["version"]
+description = "Browse a macOS Photos library (.photoslibrary) from any web browser, read-only"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pillow>=10",
+    "pillow-heif>=0.16",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+]
+
+[project.scripts]
+photoslibrary-viewer = "photoslibrary_viewer.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "photoslibrary_viewer.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["photoslibrary_viewer*"]
+
+[tool.setuptools.package-data]
+photoslibrary_viewer = ["static/*"]
