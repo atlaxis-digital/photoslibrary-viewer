@@ -31,4 +31,4 @@ version = {attr = "photoslibrary_viewer.__version__"}
 include = ["photoslibrary_viewer*"]
 
 [tool.setuptools.package-data]
-photoslibrary_viewer = ["static/*", "static/icons/*"]
+photoslibrary_viewer = ["static/*", "static/icons/*", "static/vendor/*/*", "static/vendor/*/images/*"]

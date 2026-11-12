@@ -14,23 +14,43 @@ library.
 
 ## Features
 
-- **Timeline** of all photos and videos, grouped by month, with a year
-  scrubber; smooth even with 50 000+ items (virtualized grid)
+Most of the "smart" parts are already computed by Photos and stored in the
+library; the viewer shows them as they are.
+
+**Browsing**
+- **All Photos** timeline grouped by month, with a year scrubber; smooth even
+  with 50 000+ items (virtualized grid)
+- **Days** (Photos' own curated selection, with place names per day),
+  **Months** (with trips and weekends) and **Years**
+- **Memories** with Photos' own titles and photo selection
+- **People** with face thumbnails, **Places** on a map (clustered photo pins)
+  and as a list of cities, **Favorites**, **Imports** (with their source app)
 - **Albums and folders** in their original nesting and order
-- **People**: named people with face thumbnails
-- **Favorites, Videos, Live Photos, Edited** smart views
+- **Media types**: Videos, Selfies, Live Photos, Portrait, Panoramas,
+  Time-lapse, Slo-mo, Bursts, Screenshots, Screen Recordings, Edited
+- **Recently Deleted** and **Hidden** (both opt-in)
+
+**Viewing**
+- **Zoom & pan**: mouse wheel, pinch, double-click for 100 %, drag to move
+- **Slideshow** (fullscreen, videos play to the end; `S` or the ▶ button)
+- **Fullscreen** for the whole app or a single photo/video (button or `F`)
 - **Edited versions** are shown; the untouched original is one click away
 - **Videos** stream with seeking; **Live Photos** play their motion clip
 - **HEIC** photos are converted to JPEG on the fly for browsers that can't
   show HEIC (converted files are cached)
-- **Info panel**: date with capture time zone, camera, lens, exposure,
-  location (OpenStreetMap link), albums, people and keywords
-- **Search** across file names, titles, captions, keywords, album names and
-  people
-- **Fullscreen** for the whole app or a single photo/video (button, `F` or
-  double-click)
-- Keyboard (← → Esc `F` `i` Space `/`), swipe gestures, light and dark mode,
-  English and German UI
+- **Info panel**: place name and address, date with capture time zone,
+  camera, lens, exposure, albums, people, keywords, import source
+
+**Finding**
+- **Search** that combines the library's own data (file names, titles,
+  captions, keywords, albums, people, places) with **the search index Photos
+  maintains itself**: things it recognised in the photos ("beach",
+  "mountain"), text found in images, camera models, seasons, media types.
+  Matching index entries are shown as chips above the results.
+
+**Everything else**
+- Keyboard: ← → Esc `F` `S` `i` `+` `-` `0` Space `/`; swipe gestures
+- Light and dark mode, English and German UI
 - **Installable as an app** in Chrome, Edge and on iOS/Android home screens
 - Optional HTTP Basic auth
 
@@ -39,14 +59,15 @@ library.
 ```
 Library.photoslibrary/
 ├── database/Photos.sqlite      → copied to the cache, then read
+├── database/search/psi.sqlite  → Photos' search index, copied, used by search
 ├── originals/…                 → served for download / full view
 └── resources/
     ├── derivatives/…           → thumbnails and screen-size previews
     └── renders/…               → your edited versions
 ```
 
-On start (and whenever `Photos.sqlite` changes) the database is **copied into
-the cache directory** and only the copy is opened, so the library is never
+On start (and whenever `Photos.sqlite` changes) the databases are **copied
+into the cache directory** and only the copies are opened, so the library is never
 locked or modified and can sit on a read-only mount. Everything else is read
 on demand. Table and column names of the Photos database change between macOS
 releases; the viewer resolves them at runtime instead of hard-coding them.
@@ -137,6 +158,9 @@ working library on a local drive.
 | `PLV_PORT`        | `--port`        | `8395`             | Port                                           |
 | `PLV_TITLE`       |                 | library name       | Title shown in the sidebar                     |
 | `PLV_SHOW_HIDDEN` | `--show-hidden` | `0`                | `1` includes photos marked as hidden           |
+| `PLV_SHOW_DELETED`|                 | `0`                | `1` adds the Recently Deleted view             |
+| `PLV_MAP_TILES`   |                 | OpenStreetMap      | Tile URL template for the Places map           |
+| `PLV_MAP_ATTRIBUTION` |             | © OpenStreetMap    | Attribution shown on the map                   |
 | `PLV_REFRESH`     |                 | `300`              | Seconds between checks for a changed database  |
 | `PLV_USER`        |                 | –                  | Basic auth user name (optional)                |
 | `PLV_PASSWORD`    |                 | –                  | Enables Basic auth when set                    |
@@ -151,13 +175,17 @@ proper authentication. Don't expose it to the internet as is.
 ## Limitations
 
 - Read-only by design: no editing, favoriting or album changes.
-- Smart albums, Memories, Shared Albums and iCloud-only items ("optimize Mac
-  storage") are not shown. Items without a local original still show their
-  preview if Photos stored one.
+- Smart albums, Shared Albums and iCloud-only items ("optimize Mac storage")
+  are not shown. Items without a local original still show their preview if
+  Photos stored one. Memories show their photos, not the generated movie.
 - Videos play if the browser supports the codec (H.264 everywhere; HEVC
   depends on browser and hardware). Other formats (AVI, 3GP) can be
   downloaded.
-- Place names are not resolved; locations link to OpenStreetMap.
+- The Places map loads map tiles from OpenStreetMap by default, so the
+  areas you look at are requested from their servers. Set `PLV_MAP_TILES` to
+  your own tile server to avoid that. Everything else stays on your server.
+- Days, Months, Memories, place names and the search index exist only for
+  photos Photos has already analysed on the Mac.
 
 ## Prior art
 
@@ -168,4 +196,7 @@ a browser view of the library as it is.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Bundled: [Leaflet](https://leafletjs.com)
+(BSD-2-Clause) and
+[Leaflet.markercluster](https://github.com/Leaflet/Leaflet.markercluster)
+(MIT), see their `LICENSE` files under `photoslibrary_viewer/static/vendor/`.

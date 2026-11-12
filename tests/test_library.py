@@ -101,3 +101,41 @@ def test_source_untouched(tmp_path):
     before = sorted(p.name for p in (path / "database").iterdir())
     Library(path, tmp_path / "cache").refresh(force=True)
     assert sorted(p.name for p in (path / "database").iterdir()) == before
+
+
+def test_deleted_opt_in(tmp_path):
+    lib = Library(make_library(tmp_path), tmp_path / "cache", show_deleted=True)
+    lib.refresh(force=True)
+    s = lib.snap
+    assert s.deleted == [5] and s.assets[5].deleted
+    assert 5 not in s.timeline  # never mixed into the library
+
+
+def test_memories_and_highlights(tmp_path):
+    path = make_library(tmp_path)
+    con = sqlite3.connect(path / "database" / "Photos.sqlite")
+    con.executescript("""
+        INSERT INTO Z_PRIMARYKEY VALUES (51,'Memory'),(57,'PhotosHighlight');
+        CREATE TABLE ZMEMORY (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZSUBTITLE TEXT, ZCREATIONDATE REAL,
+          ZKEYASSET INT, ZREJECTED INT, ZFAVORITE INT);
+        INSERT INTO ZMEMORY VALUES (1, 'Rom\nentdecken', 'Okt. 2023', 700000000, 3, 0, 0);
+        INSERT INTO ZMEMORY VALUES (2, 'Rejected', '', 700000000, 1, 1, 0);
+        CREATE TABLE Z_3MEMORIESBEINGCURATEDASSETS (Z_3CURATEDASSETS INT, Z_51MEMORIESBEINGCURATEDASSETS INT);
+        INSERT INTO Z_3MEMORIESBEINGCURATEDASSETS VALUES (1, 1), (3, 1), (5, 1), (1, 2);
+        CREATE TABLE ZPHOTOSHIGHLIGHT (Z_PK INTEGER PRIMARY KEY, ZKIND INT, ZTYPE INT, ZTITLE TEXT, ZSUBTITLE TEXT,
+          ZSTARTDATE REAL, ZENDDATE REAL, ZPARENTPHOTOSHIGHLIGHT INT, ZPARENTDAYGROUPPHOTOSHIGHLIGHT INT);
+        INSERT INTO ZPHOTOSHIGHLIGHT VALUES (100, 2, 0, '1923', NULL, 0, 0, NULL, NULL);
+        INSERT INTO ZPHOTOSHIGHLIGHT VALUES (101, 1, 0, NULL, char(63743)||'März'||char(63743)||' 1923', 0, 0, 100, NULL);
+        INSERT INTO ZPHOTOSHIGHLIGHT VALUES (102, 0, 0, '3. März', NULL, 0, 0, 101, NULL);
+        ALTER TABLE ZASSET ADD COLUMN ZHIGHLIGHTBEINGASSETS INT;
+        UPDATE ZASSET SET ZHIGHLIGHTBEINGASSETS = 102 WHERE Z_PK IN (1, 2);
+    """)
+    con.commit()
+    con.close()
+    lib = Library(path, tmp_path / "cache")
+    lib.refresh(force=True)
+    s = lib.snap
+    assert [m.title for m in s.memories] == ["Rom entdecken"]
+    assert s.memories[0].assets == [1, 3]  # deleted item 5 left out, date order
+    assert s.highlights[101].title == "März 1923"
+    assert sorted(s.highlights[101].assets) == [1, 2] and sorted(s.highlights[100].assets) == [1, 2]

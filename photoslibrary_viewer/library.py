@@ -3,7 +3,8 @@
 The library database (``database/Photos.sqlite``) is a Core Data store whose
 table and column names shift between macOS releases. Entity numbers (the
 ``Z_<n>`` prefixes of join tables) are therefore resolved at runtime from
-``Z_PRIMARYKEY`` instead of being hard-coded.
+``Z_PRIMARYKEY`` instead of being hard-coded, and optional columns are looked
+up before use.
 
 The source library is never written to: the database is copied into the cache
 directory and only that copy is opened.
@@ -18,8 +19,11 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .places import parse_reverse_geo
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +33,24 @@ CORE_DATA_EPOCH = 978307200
 KIND_PHOTO = 0
 KIND_VIDEO = 1
 
+# ZKINDSUBTYPE values
+SUB_PANORAMA = 1
+SUB_LIVE = 2
+SUB_SCREENSHOT = 10
+SUB_SLOMO = 101
+SUB_TIMELAPSE = 102
+SUB_SCREEN_RECORDING = 103
+
 ALBUM_KIND_USER = 2
+ALBUM_KIND_IMPORT = 1506
 ALBUM_KIND_ROOT_FOLDER = 3999
 ALBUM_KIND_FOLDER = 4000
+
+# ZPHOTOSHIGHLIGHT.ZKIND
+HIGHLIGHT_DAY = 0
+HIGHLIGHT_MONTH = 1
+HIGHLIGHT_YEAR = 2
+HIGHLIGHT_DAY_GROUP = 3  # trips and weekends spanning several days
 
 # Bit flags packed into the compact asset list sent to the browser.
 FLAG_VIDEO = 1
@@ -39,8 +58,15 @@ FLAG_FAVORITE = 2
 FLAG_LIVE = 4
 FLAG_EDITED = 8
 FLAG_HIDDEN = 16
+FLAG_DELETED = 32
+
+SEP = "\uf8ff"  # separator Photos puts into highlight titles
 
 DB_FILES = ("Photos.sqlite", "Photos.sqlite-wal", "Photos.sqlite-shm")
+
+
+def _date(value: float | None) -> float:
+    return (value or 0) + CORE_DATA_EPOCH if value else 0.0
 
 
 @dataclass(slots=True)
@@ -65,6 +91,18 @@ class Asset:
     latitude: float | None
     longitude: float | None
     uti: str
+    selfie: bool = False
+    portrait: bool = False
+    burst: str | None = None
+    deleted: bool = False
+    deleted_at: float = 0.0
+    import_session: int | None = None
+    imported_by: str = ""
+    day_highlight: int | None = None
+    curated: bool = False  # part of Photos' own selection for the Days view
+    city: str = ""
+    country: str = ""
+    address: str = ""
     keywords: list[str] = field(default_factory=list)
 
     @property
@@ -73,8 +111,12 @@ class Asset:
 
     @property
     def is_live(self) -> bool:
-        # ZKINDSUBTYPE 2 marks a Live Photo (still + paired movie).
-        return self.kind == KIND_PHOTO and self.subtype == 2
+        return self.kind == KIND_PHOTO and self.subtype == SUB_LIVE
+
+    @property
+    def local_date(self) -> float:
+        """Capture time as 'wall clock' seconds (format as UTC)."""
+        return self.date + self.tz_offset
 
     @property
     def flags(self) -> int:
@@ -89,6 +131,8 @@ class Asset:
             f |= FLAG_EDITED
         if self.hidden:
             f |= FLAG_HIDDEN
+        if self.deleted:
+            f |= FLAG_DELETED
         return f
 
 
@@ -128,21 +172,62 @@ class Face:
     size: float
 
 
+@dataclass(slots=True)
+class Memory:
+    pk: int
+    title: str
+    subtitle: str
+    date: float
+    favorite: bool
+    key_asset: int | None
+    assets: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class Highlight:
+    pk: int
+    kind: int
+    type: int
+    title: str
+    start: float
+    end: float
+    parent: int | None
+    day_group: int | None
+    key_asset: int | None = None
+    assets: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ImportSession:
+    pk: int
+    date: float
+    assets: list[int] = field(default_factory=list)
+    source: str = ""
+
+
 class Snapshot:
     """Everything loaded from one copy of the database."""
 
     def __init__(self) -> None:
-        self.assets: dict[int, Asset] = {}
-        self.timeline: list[int] = []  # asset pks, newest first
+        self.assets: dict[int, Asset] = {}  # includes deleted items
+        self.timeline: list[int] = []  # visible asset pks, newest first
+        self.deleted: list[int] = []  # recently deleted, most recent first
         self.albums: dict[int, Album] = {}
         self.root_folder: int | None = None
         self.people: dict[int, Person] = {}
         self.faces: dict[int, Face] = {}
+        self.memories: list[Memory] = []
+        self.highlights: dict[int, Highlight] = {}
+        self.imports: list[ImportSession] = []
         self.asset_albums: dict[int, list[int]] = {}
         self.asset_people: dict[int, list[int]] = {}
         self.by_uuid: dict[str, int] = {}
         self.loaded_at = time.time()
         self.source_mtime = 0.0
+
+    def visible(self, pk: int) -> bool:
+        a = self.assets.get(pk)
+        return a is not None and not a.deleted
 
 
 class Library:
@@ -151,12 +236,15 @@ class Library:
         path: str | os.PathLike,
         cache_dir: str | os.PathLike,
         show_hidden: bool = False,
+        show_deleted: bool = False,
     ) -> None:
         self.path = Path(path)
         self.cache_dir = Path(cache_dir)
         self.show_hidden = show_hidden
+        self.show_deleted = show_deleted
         self._lock = threading.Lock()
         self.snapshot: Snapshot | None = None
+        self.listeners: list = []  # called with the new snapshot after a reload
         if not (self.path / "database" / "Photos.sqlite").is_file():
             raise FileNotFoundError(
                 f"{self.path} does not look like a Photos library "
@@ -178,46 +266,29 @@ class Library:
             if not force and self.snapshot and self.snapshot.source_mtime == mtime:
                 return False
             t0 = time.time()
-            db_path = self._copy_database()
+            db_path = copy_sqlite(self.path / "database", "Photos.sqlite", self.cache_dir / "db")
             snap = self._load(db_path)
             snap.source_mtime = mtime
             self.snapshot = snap
             log.info(
-                "loaded %d assets, %d albums, %d people in %.1fs",
-                len(snap.assets), len(snap.albums), len(snap.people), time.time() - t0,
+                "loaded %d assets, %d albums, %d people, %d memories in %.1fs",
+                len(snap.timeline), len(snap.albums), len(snap.people),
+                len(snap.memories), time.time() - t0,
             )
-            return True
-
-    def _copy_database(self) -> Path:
-        """Copy Photos.sqlite (+WAL) into the cache so the source stays untouched."""
-        target = self.cache_dir / "db"
-        tmp = self.cache_dir / "db.tmp"
-        shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
-        for name in DB_FILES:
-            src = self.path / "database" / name
-            if src.exists():
-                shutil.copyfile(src, tmp / name)
-        # Fold the WAL into the main file so the copy is self-contained.
-        con = sqlite3.connect(tmp / "Photos.sqlite")
-        try:
-            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            con.execute("PRAGMA journal_mode=DELETE")
-        finally:
-            con.close()
-        shutil.rmtree(target, ignore_errors=True)
-        tmp.rename(target)
-        return target / "Photos.sqlite"
+        for listener in self.listeners:
+            try:
+                listener(snap)
+            except Exception:
+                log.exception("listener failed")
+        return True
 
     def _load(self, db_path: Path) -> Snapshot:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         try:
-            return _Loader(con, self.show_hidden).load()
+            return _Loader(con, self.show_hidden, self.show_deleted).load()
         finally:
             con.close()
-
-    # --------------------------------------------------------------- helpers
 
     @property
     def snap(self) -> Snapshot:
@@ -227,10 +298,32 @@ class Library:
         return self.snapshot
 
 
+def copy_sqlite(src_dir: Path, name: str, target: Path) -> Path:
+    """Copy an SQLite database (+WAL/SHM) into ``target`` and fold the WAL in,
+    so the copy is self-contained and the source is never opened."""
+    tmp = target.with_name(target.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for suffix in ("", "-wal", "-shm"):
+        src = src_dir / f"{name}{suffix}"
+        if src.exists():
+            shutil.copyfile(src, tmp / f"{name}{suffix}")
+    con = sqlite3.connect(tmp / name)
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        con.close()
+    shutil.rmtree(target, ignore_errors=True)
+    tmp.rename(target)
+    return target / name
+
+
 class _Loader:
-    def __init__(self, con: sqlite3.Connection, show_hidden: bool) -> None:
+    def __init__(self, con: sqlite3.Connection, show_hidden: bool, show_deleted: bool) -> None:
         self.con = con
         self.show_hidden = show_hidden
+        self.show_deleted = show_deleted
         self.ent = {
             row["Z_NAME"]: row["Z_ENT"]
             for row in con.execute("SELECT Z_ENT, Z_NAME FROM Z_PRIMARYKEY")
@@ -256,12 +349,15 @@ class _Loader:
                 return c
         return default
 
-    def find_join(self, left: str, right: str) -> tuple[str, str, str, str | None] | None:
+    def find_join(
+        self, left: str, right: str, suffix: str = ""
+    ) -> tuple[str, str, str, str | None] | None:
         """Locate the Core Data join table between two entities.
 
         Returns (table, left_column, right_column, order_column). Join tables
-        are named Z_<leftEnt><RELATION> with columns Z_<leftEnt><x> and
+        are named Z_<ent><RELATION> with columns Z_<leftEnt><x> and
         Z_<rightEnt><y>; the relation names vary, so match on the prefixes.
+        ``suffix`` narrows the choice when several relations exist.
         """
         le, re_ = self.ent.get(left), self.ent.get(right)
         if le is None or re_ is None:
@@ -272,6 +368,8 @@ class _Loader:
         ordered = sorted(self.tables, key=lambda t: (not lpat.match(t), t))
         for table in ordered:
             if not re.fullmatch(r"Z_\d+[A-Z0-9_]+", table):
+                continue
+            if suffix and not table.endswith(suffix):
                 continue
             cols = self.cols(table)
             lcol = [c for c in cols if lpat.match(c)]
@@ -285,52 +383,83 @@ class _Loader:
 
     def load(self) -> Snapshot:
         s = Snapshot()
-        self._load_assets(s)
-        self._load_keywords(s)
-        self._load_albums(s)
-        self._load_people(s)
+        steps = (
+            self._load_assets, self._load_keywords, self._load_albums, self._load_people,
+            self._load_memories, self._load_highlights, self._load_imports,
+        )
+        for step in steps:
+            try:
+                step(s)
+            except sqlite3.Error:
+                # A schema we don't know must not take the whole viewer down.
+                log.exception("could not load %s", step.__name__)
         return s
 
     def _load_assets(self, s: Snapshot) -> None:
-        c = self.con
+        A = "ZASSET"
         has_aaa = "ZADDITIONALASSETATTRIBUTES" in self.tables
         has_desc = "ZASSETDESCRIPTION" in self.tables
-        adjusted = self.col("ZASSET", "ZADJUSTMENTSSTATE", "ZHASADJUSTMENTS", default="0")
-        subtype = self.col("ZASSET", "ZKINDSUBTYPE", default="0")
-        visibility = self.col("ZASSET", "ZVISIBILITYSTATE", default="0")
-        uti = self.col("ZASSET", "ZUNIFORMTYPEIDENTIFIER", default="''")
+
+        def ac(*names: str, default: str = "NULL") -> str:
+            c = self.col(A, *names, default="")
+            return f"a.{c}" if c else default
+
+        def aa(*names: str, default: str = "NULL") -> str:
+            if not has_aaa:
+                return default
+            c = self.col("ZADDITIONALASSETATTRIBUTES", *names, default="")
+            return f"aa.{c}" if c else default
+
         sql = f"""
-            SELECT a.Z_PK, a.ZUUID, a.ZDATECREATED, a.ZKIND, a.{subtype} AS subtype,
+            SELECT a.Z_PK, a.ZUUID, a.ZDATECREATED, a.ZKIND,
+                   {ac("ZKINDSUBTYPE", default="0")} AS subtype,
                    a.ZWIDTH, a.ZHEIGHT, a.ZDURATION, a.ZFAVORITE, a.ZHIDDEN,
-                   a.{adjusted} AS adjusted, a.ZDIRECTORY, a.ZFILENAME,
-                   a.ZLATITUDE, a.ZLONGITUDE, a.{uti} AS uti,
-                   {"aa.ZORIGINALFILENAME" if has_aaa else "NULL"} AS original_filename,
-                   {"aa.ZTITLE" if has_aaa else "NULL"} AS title,
-                   {"aa.ZTIMEZONEOFFSET" if has_aaa else "0"} AS tz,
+                   {ac("ZADJUSTMENTSSTATE", "ZHASADJUSTMENTS", default="0")} AS adjusted,
+                   a.ZDIRECTORY, a.ZFILENAME, a.ZLATITUDE, a.ZLONGITUDE,
+                   {ac("ZUNIFORMTYPEIDENTIFIER", default="''")} AS uti,
+                   a.ZTRASHEDSTATE AS trashed,
+                   {ac("ZTRASHEDDATE")} AS trashed_date,
+                   {ac("ZDEPTHTYPE", default="0")} AS depth,
+                   {ac("ZAVALANCHEUUID")} AS burst,
+                   {ac("ZIMPORTSESSION")} AS import_session,
+                   {ac("ZHIGHLIGHTBEINGASSETS")} AS day_highlight,
+                   {ac("ZHIGHLIGHTBEINGSUMMARYASSETS")} AS summary,
+                   {ac("ZISDETECTEDSCREENSHOT", default="0")} AS screenshot,
+                   {aa("ZORIGINALFILENAME")} AS original_filename,
+                   {aa("ZTITLE")} AS title,
+                   {aa("ZTIMEZONEOFFSET", default="0")} AS tz,
+                   {aa("ZCAMERACAPTUREDEVICE", default="0")} AS capture_device,
+                   {aa("ZIMPORTEDBYDISPLAYNAME", default="''")} AS imported_by,
+                   {aa("ZREVERSELOCATIONDATA")} AS revgeo,
                    {"d.ZLONGDESCRIPTION" if has_aaa and has_desc else "NULL"} AS descr
             FROM ZASSET a
             {"LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.ZASSET = a.Z_PK" if has_aaa else ""}
             {"LEFT JOIN ZASSETDESCRIPTION d ON d.ZASSETATTRIBUTES = aa.Z_PK" if has_aaa and has_desc else ""}
-            WHERE a.ZTRASHEDSTATE = 0
-              AND a.{visibility} = 0
+            WHERE {ac("ZVISIBILITYSTATE", default="0")} = 0
               AND a.ZUUID IS NOT NULL
         """
-        rows = []
-        for r in c.execute(sql):
+        visible: list[Asset] = []
+        deleted: list[Asset] = []
+        for r in self.con.execute(sql):
+            trashed = bool(r["trashed"])
+            if trashed and not self.show_deleted:
+                continue
             hidden = bool(r["ZHIDDEN"])
             if hidden and not self.show_hidden:
                 continue
             lat, lon = r["ZLATITUDE"], r["ZLONGITUDE"]
             if lat is None or lon is None or lat < -90 or lat > 90 or (lat == 0 and lon == 0):
                 lat = lon = None
-            date = (r["ZDATECREATED"] or 0) + CORE_DATA_EPOCH
+            subtype = r["subtype"] or 0
+            if r["screenshot"] and subtype == 0 and (r["ZKIND"] or 0) == KIND_PHOTO:
+                subtype = SUB_SCREENSHOT
             a = Asset(
                 pk=r["Z_PK"],
                 uuid=r["ZUUID"],
-                date=date,
+                date=_date(r["ZDATECREATED"]),
                 tz_offset=int(r["tz"] or 0),
                 kind=r["ZKIND"] or 0,
-                subtype=r["subtype"] or 0,
+                subtype=subtype,
                 width=r["ZWIDTH"] or 0,
                 height=r["ZHEIGHT"] or 0,
                 duration=float(r["ZDURATION"] or 0),
@@ -345,12 +474,26 @@ class _Loader:
                 latitude=lat,
                 longitude=lon,
                 uti=r["uti"] or "",
+                selfie=r["capture_device"] == 1,
+                portrait=bool(r["depth"]),
+                burst=r["burst"],
+                deleted=trashed,
+                deleted_at=_date(r["trashed_date"]),
+                import_session=r["import_session"],
+                imported_by=r["imported_by"] or "",
+                day_highlight=r["day_highlight"],
+                curated=r["summary"] is not None,
             )
+            if r["revgeo"]:
+                place = parse_reverse_geo(r["revgeo"])
+                a.city, a.country, a.address = place.city, place.country, place.address
             s.assets[a.pk] = a
             s.by_uuid[a.uuid] = a.pk
-            rows.append(a)
-        rows.sort(key=lambda a: a.date, reverse=True)
-        s.timeline = [a.pk for a in rows]
+            (deleted if trashed else visible).append(a)
+        visible.sort(key=lambda a: a.date, reverse=True)
+        deleted.sort(key=lambda a: a.deleted_at, reverse=True)
+        s.timeline = [a.pk for a in visible]
+        s.deleted = [a.pk for a in deleted]
 
     def _load_keywords(self, s: Snapshot) -> None:
         if "ZKEYWORD" not in self.tables or "ZADDITIONALASSETATTRIBUTES" not in self.tables:
@@ -406,7 +549,7 @@ class _Loader:
             sql = f"SELECT jt.{lcol} AS album, jt.{rcol} AS asset FROM {table} jt ORDER BY {order}"
             for r in self.con.execute(sql):
                 album = s.albums.get(r["album"])
-                if album is None or r["asset"] not in s.assets:
+                if album is None or not s.visible(r["asset"]):
                     continue
                 album.assets.append(r["asset"])
                 s.asset_albums.setdefault(r["asset"], []).append(album.pk)
@@ -416,7 +559,7 @@ class _Loader:
                 album.assets.sort(
                     key=lambda pk: s.assets[pk].date, reverse=not album.sort_ascending
                 )
-            if album.key_asset not in s.assets:
+            if not s.visible(album.key_asset) or album.key_asset not in album.assets:
                 album.key_asset = album.assets[0] if album.assets else None
 
     def _load_people(self, s: Snapshot) -> None:
@@ -445,7 +588,7 @@ class _Loader:
                 FROM ZDETECTEDFACE
                 WHERE {f_asset} IS NOT NULL AND {f_hidden} = 0 AND {f_visible} = 1"""
         ):
-            if r["asset"] not in s.assets:
+            if not s.visible(r["asset"]):
                 continue
             face = Face(
                 pk=r["Z_PK"],
@@ -471,3 +614,117 @@ class _Loader:
                 person.key_face = first_face.get(person.pk)
             for pk in person.assets:
                 s.asset_people.setdefault(pk, []).append(person.pk)
+
+    def _load_memories(self, s: Snapshot) -> None:
+        if "ZMEMORY" not in self.tables:
+            return
+        j = self.find_join("Memory", "Asset", suffix="MEMORIESBEINGCURATEDASSETS") or self.find_join(
+            "Memory", "Asset", suffix="MEMORIESBEINGREPRESENTATIVEASSETS"
+        )
+        if not j:
+            return
+        table, mcol, acol, _ = j
+        members: dict[int, list[int]] = {}
+        for r in self.con.execute(f"SELECT {mcol} AS m, {acol} AS a FROM {table}"):
+            if s.visible(r["a"]):
+                members.setdefault(r["m"], []).append(r["a"])
+        rejected = self.col("ZMEMORY", "ZREJECTED", default="0")
+        favorite = self.col("ZMEMORY", "ZFAVORITE", default="0")
+        for r in self.con.execute(
+            f"""SELECT Z_PK, ZTITLE, ZSUBTITLE, ZCREATIONDATE, ZKEYASSET,
+                       {favorite} AS fav
+                FROM ZMEMORY WHERE {rejected} = 0"""
+        ):
+            assets = sorted(set(members.get(r["Z_PK"], [])), key=lambda pk: s.assets[pk].date)
+            if not assets:
+                continue
+            key = r["ZKEYASSET"] if r["ZKEYASSET"] in assets else assets[0]
+            s.memories.append(Memory(
+                pk=r["Z_PK"],
+                title=" ".join((r["ZTITLE"] or "").split()),
+                subtitle=" ".join((r["ZSUBTITLE"] or "").split()),
+                date=_date(r["ZCREATIONDATE"]),
+                favorite=bool(r["fav"]),
+                key_asset=key,
+                assets=assets,
+            ))
+        s.memories.sort(key=lambda m: m.date, reverse=True)
+
+    def _load_highlights(self, s: Snapshot) -> None:
+        T = "ZPHOTOSHIGHLIGHT"
+        if T not in self.tables:
+            return
+        for r in self.con.execute(
+            f"""SELECT Z_PK, ZKIND, {self.col(T, "ZTYPE", default="0")} AS type,
+                       ZTITLE, ZSUBTITLE, ZSTARTDATE, ZENDDATE,
+                       {self.col(T, "ZSTARTTIMEZONEOFFSET", default="0")} AS tz,
+                       {self.col(T, "ZPARENTPHOTOSHIGHLIGHT")} AS parent,
+                       {self.col(T, "ZPARENTDAYGROUPPHOTOSHIGHLIGHT")} AS day_group
+                FROM {T}"""
+        ):
+            # Titles carry U+F8FF separators ("17.–25. Juni 2026<U+F8FF>Juni 2026").
+            raw = r["ZTITLE"] or r["ZSUBTITLE"] or ""
+            title = " ".join(raw.replace(SEP, " ").split())
+            if r["ZKIND"] == HIGHLIGHT_DAY_GROUP and SEP in raw:
+                title = raw.split(SEP)[0]
+            tz = r["tz"] or 0
+            s.highlights[r["Z_PK"]] = Highlight(
+                pk=r["Z_PK"], kind=r["ZKIND"], type=r["type"] or 0, title=title.strip(),
+                start=_date(r["ZSTARTDATE"]) + tz, end=_date(r["ZENDDATE"]) + tz,
+                parent=r["parent"], day_group=r["day_group"],
+            )
+        # Key photos chosen by Photos for each level.
+        for col in ("ZHIGHLIGHTBEINGKEYASSETPRIVATE", "ZDAYGROUPHIGHLIGHTBEINGKEYASSETPRIVATE",
+                    "ZMONTHHIGHLIGHTBEINGKEYASSETPRIVATE", "ZYEARHIGHLIGHTBEINGKEYASSETPRIVATE"):
+            if col not in self.cols("ZASSET"):
+                continue
+            for r in self.con.execute(f"SELECT Z_PK, {col} AS h FROM ZASSET WHERE {col} IS NOT NULL"):
+                h = s.highlights.get(r["h"])
+                if h and s.visible(r["Z_PK"]):
+                    h.key_asset = r["Z_PK"]
+        # Members: day -> its month and day group (trip).
+        for pk in reversed(s.timeline):  # oldest first
+            day = s.highlights.get(s.assets[pk].day_highlight)
+            if day is None:
+                continue
+            day.assets.append(pk)
+            for up in (day.parent, day.day_group):
+                h = s.highlights.get(up)
+                if h is not None:
+                    h.assets.append(pk)
+                    year = s.highlights.get(h.parent) if h.kind == HIGHLIGHT_MONTH else None
+                    if year is not None and up == day.parent:
+                        year.assets.append(pk)
+        for h in s.highlights.values():
+            if h.key_asset is None and h.assets:
+                h.key_asset = h.assets[len(h.assets) // 2]
+
+    def _load_imports(self, s: Snapshot) -> None:
+        sessions: dict[int, ImportSession] = {}
+        for pk in s.timeline:
+            a = s.assets[pk]
+            if a.import_session is None:
+                continue
+            sess = sessions.setdefault(a.import_session, ImportSession(pk=a.import_session, date=0.0))
+            sess.assets.append(pk)
+        dates = {}
+        start = self.col("ZGENERICALBUM", "ZSTARTDATE", "ZCREATIONDATE")
+        for r in self.con.execute(
+            f"SELECT Z_PK, {start} AS d FROM ZGENERICALBUM WHERE ZKIND = ?", (ALBUM_KIND_IMPORT,)
+        ):
+            dates[r["Z_PK"]] = _date(r["d"])
+        for sess in sessions.values():
+            sess.assets.sort(key=lambda pk: s.assets[pk].date)
+            sess.date = dates.get(sess.pk) or max(s.assets[pk].date for pk in sess.assets)
+            sources = Counter(s.assets[pk].imported_by for pk in sess.assets if s.assets[pk].imported_by)
+            sess.source = sources.most_common(1)[0][0] if sources else ""
+        s.imports = sorted(sessions.values(), key=lambda x: x.date, reverse=True)
+
+
+def top_places(assets: list[Asset], limit: int = 2) -> str:
+    """'Tübingen, Stuttgart' – the most frequent cities (or countries)."""
+    cities = Counter(a.city for a in assets if a.city)
+    if cities:
+        return ", ".join(c for c, _ in cities.most_common(limit))
+    countries = Counter(a.country for a in assets if a.country)
+    return ", ".join(c for c, _ in countries.most_common(limit))

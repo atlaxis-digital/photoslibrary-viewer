@@ -19,13 +19,37 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .library import ALBUM_KIND_FOLDER, Asset, Library, Snapshot
+from .library import (
+    ALBUM_KIND_FOLDER, HIGHLIGHT_DAY_GROUP, HIGHLIGHT_MONTH, HIGHLIGHT_YEAR,
+    SUB_PANORAMA, SUB_SCREEN_RECORDING, SUB_SCREENSHOT, SUB_SLOMO, SUB_TIMELAPSE,
+    Asset, Library, Snapshot, top_places,
+)
 from .media import VIDEO_MIME, Media
+from .search import SearchIndex
 
 log = logging.getLogger("photoslibrary_viewer")
 
 STATIC = Path(__file__).parent / "static"
 IMAGE_CACHE = "public, max-age=604800"
+DAY = 86400
+
+# Smart views over the timeline: name -> predicate
+SMART_VIEWS = {
+    "favorites": lambda a: a.favorite,
+    "videos": lambda a: a.is_video,
+    "selfies": lambda a: a.selfie,
+    "live": lambda a: a.is_live,
+    "portrait": lambda a: a.portrait,
+    "panoramas": lambda a: a.subtype == SUB_PANORAMA,
+    "timelapse": lambda a: a.subtype == SUB_TIMELAPSE,
+    "slomo": lambda a: a.subtype == SUB_SLOMO,
+    "bursts": lambda a: a.burst is not None,
+    "screenshots": lambda a: a.subtype == SUB_SCREENSHOT,
+    "screenrec": lambda a: a.subtype == SUB_SCREEN_RECORDING,
+    "edited": lambda a: a.edited,
+    "hidden": lambda a: a.hidden,
+    "places": lambda a: a.latitude is not None,
+}
 
 
 class Settings:
@@ -34,9 +58,25 @@ class Settings:
         self.cache = os.environ.get("PLV_CACHE", "./cache")
         self.title = os.environ.get("PLV_TITLE", "")
         self.show_hidden = os.environ.get("PLV_SHOW_HIDDEN", "0") == "1"
+        self.show_deleted = os.environ.get("PLV_SHOW_DELETED", "0") == "1"
         self.refresh = int(os.environ.get("PLV_REFRESH", "300"))
         self.user = os.environ.get("PLV_USER", "")
         self.password = os.environ.get("PLV_PASSWORD", "")
+        self.tiles = os.environ.get(
+            "PLV_MAP_TILES", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        )
+        self.tiles_attribution = os.environ.get(
+            "PLV_MAP_ATTRIBUTION",
+            '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        )
+
+
+def _place_key(a: Asset) -> str:
+    return f"{a.city}|{a.country}"
+
+
+def _day_key(a: Asset) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(a.local_date))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -45,10 +85,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise SystemExit("Set PLV_LIBRARY to the path of a .photoslibrary")
     cache = Path(settings.cache)
     cache.mkdir(parents=True, exist_ok=True)
-    library = Library(settings.library, cache, show_hidden=settings.show_hidden)
+    library = Library(
+        settings.library, cache,
+        show_hidden=settings.show_hidden, show_deleted=settings.show_deleted,
+    )
+    search = SearchIndex(library.path, cache)
+    library.listeners.append(search.rebuild)
     library.refresh(force=True)
     media = Media(library.path, cache)
-    search = _SearchIndex()
+    title = settings.title or (
+        library.path.stem if library.path.suffix == ".photoslibrary" else "Photos"
+    )
 
     app = FastAPI(title="photoslibrary-viewer", version=__version__, docs_url=None, redoc_url=None)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
@@ -95,65 +142,116 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404)
         return a
 
+    def card(pks: list[int], s: Snapshot, key: int | None = None) -> dict:
+        return {
+            "key": key if key in s.assets else (pks[len(pks) // 2] if pks else None),
+            "count": len(pks),
+            "places": top_places([s.assets[pk] for pk in pks]),
+        }
+
     # ------------------------------------------------------------------ API
 
     @app.get("/api/info")
     def info() -> dict:
         s = snap()
-        videos = sum(1 for a in s.assets.values() if a.is_video)
+        counts = {name: 0 for name in SMART_VIEWS}
+        for pk in s.timeline:
+            a = s.assets[pk]
+            for name, pred in SMART_VIEWS.items():
+                if pred(a):
+                    counts[name] += 1
+        counts["library"] = len(s.timeline)
+        counts["days"] = sum(1 for pk in s.timeline if s.assets[pk].curated)
+        if settings.show_deleted:
+            counts["deleted"] = len(s.deleted)
+        if not settings.show_hidden:
+            counts.pop("hidden")
         return {
             "version": __version__,
-            "title": settings.title or (
-                library.path.stem if library.path.suffix == ".photoslibrary" else "Photos"
-            ),
-            "assets": len(s.assets),
-            "videos": videos,
-            "favorites": sum(1 for a in s.assets.values() if a.favorite),
+            "title": title,
+            "assets": len(s.timeline),
+            "videos": counts["videos"],
+            "counts": counts,
             "albums": sum(1 for a in s.albums.values() if not a.is_folder),
             "people": len(s.people),
-            "places": sum(1 for a in s.assets.values() if a.latitude is not None),
+            "memories": len(s.memories),
+            "imports": len(s.imports),
+            "cities": len({_place_key(s.assets[pk]) for pk in s.timeline if s.assets[pk].city}),
+            "years": sum(1 for h in s.highlights.values() if h.kind == HIGHLIGHT_YEAR and h.assets),
             "loaded": s.loaded_at,
             "hidden": settings.show_hidden,
+            "deleted": settings.show_deleted,
+            "map": {"tiles": settings.tiles, "attribution": settings.tiles_attribution},
         }
 
     @app.get("/api/assets")
     def assets(view: str = "library") -> JSONResponse:
         s = snap()
-        title = ""
+        title = subtitle = ""
+        group = "month"
+        extra: dict = {}
         kind, _, arg = view.partition(":")
         if kind == "library":
             pks = s.timeline
-        elif kind == "favorites":
-            pks = [pk for pk in s.timeline if s.assets[pk].favorite]
-        elif kind == "videos":
-            pks = [pk for pk in s.timeline if s.assets[pk].is_video]
-        elif kind == "live":
-            pks = [pk for pk in s.timeline if s.assets[pk].is_live]
-        elif kind == "edited":
-            pks = [pk for pk in s.timeline if s.assets[pk].edited]
-        elif kind == "hidden":
-            pks = [pk for pk in s.timeline if s.assets[pk].hidden]
-        elif kind == "places":
-            pks = [pk for pk in s.timeline if s.assets[pk].latitude is not None]
+        elif kind == "days":
+            pks = [pk for pk in s.timeline if s.assets[pk].curated] or s.timeline
+            group = "day"
+        elif kind in SMART_VIEWS:
+            if kind == "hidden" and not settings.show_hidden:
+                raise HTTPException(404)
+            pred = SMART_VIEWS[kind]
+            pks = [pk for pk in s.timeline if pred(s.assets[pk])]
+        elif kind == "deleted":
+            if not settings.show_deleted:
+                raise HTTPException(404)
+            pks, group = s.deleted, "none"
         elif kind == "album":
             album = s.albums.get(_int(arg))
             if album is None:
                 raise HTTPException(404)
-            pks, title = album.assets, album.title
+            pks, title, group = album.assets, album.title, "none"
         elif kind == "person":
             person = s.people.get(_int(arg))
             if person is None:
                 raise HTTPException(404)
             pks, title = person.assets, person.name
+        elif kind == "memory":
+            memory = next((m for m in s.memories if m.pk == _int(arg)), None)
+            if memory is None:
+                raise HTTPException(404)
+            pks, title, subtitle, group = memory.assets, memory.title, memory.subtitle, "day"
+        elif kind in ("month", "trip"):
+            h = s.highlights.get(_int(arg))
+            if h is None:
+                raise HTTPException(404)
+            pks = sorted(h.assets, key=lambda pk: s.assets[pk].date, reverse=True)
+            title, subtitle, group = h.title, top_places([s.assets[pk] for pk in pks]), "day"
+        elif kind == "import":
+            sess = next((x for x in s.imports if x.pk == _int(arg)), None)
+            if sess is None:
+                raise HTTPException(404)
+            pks, group = sess.assets, "none"
+            title, subtitle = time.strftime("%Y-%m-%d %H:%M", time.localtime(sess.date)), sess.source
+        elif kind == "place":
+            pks = [pk for pk in s.timeline if s.assets[pk].city and _place_key(s.assets[pk]) == arg]
+            city, _, country = arg.partition("|")
+            title, subtitle = city, country
         elif kind == "search":
-            pks, title = search.query(s, arg), arg
+            pks, extra["chips"] = search.query(s, arg)
+            title = arg
         else:
             raise HTTPException(400, "unknown view")
         items = []
         for pk in pks:
             a = s.assets[pk]
-            items.append([pk, int(a.date + a.tz_offset), a.flags, round(a.duration)])
-        payload = {"view": view, "title": title, "items": items}
+            items.append([pk, int(a.local_date), a.flags, round(a.duration)])
+        payload = {"view": view, "title": title, "subtitle": subtitle, "group": group,
+                   "items": items, **extra}
+        if group == "day":
+            by_day: dict[str, list[Asset]] = {}
+            for pk in pks:
+                by_day.setdefault(_day_key(s.assets[pk]), []).append(s.assets[pk])
+            payload["days"] = {d: top_places(v) for d, v in by_day.items() if top_places(v)}
         if kind == "places":
             payload["geo"] = [
                 [pk, round(s.assets[pk].latitude, 5), round(s.assets[pk].longitude, 5)]
@@ -201,6 +299,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows.sort(key=lambda r: (-r["count"], r["name"].casefold()))
         return rows
 
+    @app.get("/api/memories")
+    def memories() -> list:
+        s = snap()
+        return [
+            {"id": m.pk, "title": m.title, "subtitle": m.subtitle, "favorite": m.favorite,
+             "date": int(m.date), **card(m.assets, s, m.key_asset)}
+            for m in s.memories
+        ]
+
+    @app.get("/api/years")
+    def years() -> list:
+        s = snap()
+        out = [
+            {"year": h.title, "start": int(h.start), **card(h.assets, s, h.key_asset)}
+            for h in s.highlights.values() if h.kind == HIGHLIGHT_YEAR and h.assets
+        ]
+        return sorted(out, key=lambda r: r["start"], reverse=True)
+
+    @app.get("/api/months")
+    def months(year: str = "") -> list:
+        s = snap()
+        trips: dict[int, list] = {}
+        for h in s.highlights.values():
+            if h.kind == HIGHLIGHT_DAY_GROUP and h.assets and h.parent is not None:
+                trips.setdefault(h.parent, []).append(
+                    {"id": h.pk, "title": h.title, "trip": h.type == 1,
+                     "start": int(h.start), **card(h.assets, s, h.key_asset)}
+                )
+        out = []
+        for h in s.highlights.values():
+            if h.kind != HIGHLIGHT_MONTH or not h.assets:
+                continue
+            parent = s.highlights.get(h.parent)
+            if year and (parent is None or parent.title != year):
+                continue
+            out.append({
+                "id": h.pk, "title": h.title, "start": int(h.start),
+                "trips": sorted(trips.get(h.pk, []), key=lambda t: t["start"], reverse=True),
+                **card(h.assets, s, h.key_asset),
+            })
+        return sorted(out, key=lambda r: r["start"], reverse=True)
+
+    @app.get("/api/imports")
+    def imports() -> list:
+        s = snap()
+        return [
+            {"id": x.pk, "date": int(x.date), "source": x.source, **card(x.assets, s)}
+            for x in s.imports
+        ]
+
+    @app.get("/api/places")
+    def places() -> list:
+        s = snap()
+        groups: dict[str, list[int]] = {}
+        for pk in s.timeline:
+            a = s.assets[pk]
+            if a.city:
+                groups.setdefault(_place_key(a), []).append(pk)
+        out = []
+        for key, pks in groups.items():
+            city, _, country = key.partition("|")
+            geo = [s.assets[pk] for pk in pks if s.assets[pk].latitude is not None]
+            out.append({
+                "id": key, "city": city, "country": country, "key": pks[len(pks) // 2],
+                "count": len(pks),
+                "lat": sum(a.latitude for a in geo) / len(geo) if geo else None,
+                "lon": sum(a.longitude for a in geo) / len(geo) if geo else None,
+            })
+        return sorted(out, key=lambda r: (-r["count"], r["city"]))
+
     @app.get("/api/asset/{pk}")
     def asset(pk: int) -> dict:
         s = snap()
@@ -222,8 +390,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "live": a.is_live and media.live_video(a) is not None,
             "edited": a.edited,
             "favorite": a.favorite,
+            "selfie": a.selfie,
+            "portrait": a.portrait,
+            "deleted": a.deleted,
+            "deletedAt": int(a.deleted_at) if a.deleted else None,
             "lat": a.latitude,
             "lon": a.longitude,
+            "city": a.city,
+            "country": a.country,
+            "address": a.address,
+            "place": _place_key(a) if a.city else None,
+            "importedBy": a.imported_by,
             "size": original.stat().st_size if original else None,
             "available": original is not None,
             "playable": _playable(media, a),
@@ -428,32 +605,3 @@ def _read(path: Path, start: int, length: int, chunk: int = 512 * 1024) -> Itera
                 break
             remaining -= len(data)
             yield data
-
-
-class _SearchIndex:
-    """Case-insensitive substring search over names, titles, keywords,
-    album titles and people; rebuilt whenever the snapshot changes."""
-
-    def __init__(self) -> None:
-        self._for: Snapshot | None = None
-        self._text: list[tuple[int, str]] = []
-        self._lock = threading.Lock()
-
-    def _build(self, s: Snapshot) -> None:
-        text = []
-        for pk in s.timeline:
-            a = s.assets[pk]
-            parts = [a.original_filename, a.title, a.description, *a.keywords]
-            parts += [s.albums[x].title for x in s.asset_albums.get(pk, []) if x in s.albums]
-            parts += [s.people[x].name for x in s.asset_people.get(pk, []) if x in s.people]
-            text.append((pk, "\n".join(p for p in parts if p).casefold()))
-        self._text, self._for = text, s
-
-    def query(self, s: Snapshot, q: str) -> list[int]:
-        with self._lock:
-            if self._for is not s:
-                self._build(s)
-        terms = [t for t in q.casefold().split() if t]
-        if not terms:
-            return []
-        return [pk for pk, text in self._text if all(t in text for t in terms)]

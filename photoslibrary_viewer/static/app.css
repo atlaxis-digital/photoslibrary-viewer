@@ -107,6 +107,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   font-size: 17px; font-weight: 650;
 }
 .section-head small { color: var(--muted); font-weight: 500; font-size: 13px; margin-left: 10px; }
+.section-head .place { color: var(--muted); font-weight: 500; font-size: 14px; margin-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 .tile {
   position: absolute; background: var(--tile); border-radius: 4px; overflow: hidden; cursor: pointer;
@@ -124,7 +125,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .tile .fav svg { width: 14px; height: 14px; fill: #fff; stroke: none; }
 
 .card-grid { display: grid; gap: 22px 18px; padding: 20px 0 40px; }
-.card { cursor: pointer; text-decoration: none; color: inherit; min-width: 0; }
+.card { min-width: 0; }
+.card > a { display: block; text-decoration: none; color: inherit; cursor: pointer; }
 .card .cover { aspect-ratio: 1; border-radius: var(--radius); background: var(--tile); overflow: hidden; position: relative; }
 .card .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .card .cover .folder-icon { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
@@ -132,8 +134,18 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .card.folder .cover { box-shadow: 6px -6px 0 -2px var(--tile), 6px -6px 0 -1px var(--line); margin: 6px 6px 0 0; }
 .card h3 { font-size: 14px; font-weight: 600; margin: 9px 0 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card p { margin: 0; font-size: 12.5px; color: var(--muted); }
-.card.person .cover { border-radius: 50%; }
-.card.person { text-align: center; }
+.card.round .cover { border-radius: 50%; }
+.card.round { text-align: center; }
+.card.wide .cover { aspect-ratio: 16 / 10; }
+.card .overlay {
+  position: absolute; inset: auto 0 0 0; padding: 40px 16px 14px; color: #fff; display: flex; flex-direction: column; gap: 2px;
+  background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.62)); text-shadow: 0 1px 3px rgba(0,0,0,.4);
+}
+.card .overlay strong { font-size: 19px; font-weight: 700; line-height: 1.15; }
+.card .overlay strong.big { font-size: 34px; letter-spacing: -.01em; }
+.card .overlay span { font-size: 13px; opacity: .9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.wide p { margin-top: 7px; }
+.card .trips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .card:hover .cover img { filter: brightness(1.06); }
 
 .date-pill {
@@ -154,10 +166,27 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 
 /* ---------- lightbox ---------- */
 .lightbox { position: fixed; inset: 0; background: #000; z-index: 50; display: flex; color: #f2f2f5; }
-.lb-stage { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; touch-action: pan-y; }
+.lb-stage { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; touch-action: none; }
 .lb-info:not([hidden]) ~ .lb-stage, .lightbox.info .lb-stage { right: 340px; }
 .lb-stage img, .lb-stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.lb-stage img { user-select: none; -webkit-user-drag: none; }
+.lb-stage img { user-select: none; -webkit-user-drag: none; transform-origin: center; will-change: transform; }
+.lb-stage img.shown { animation: lbfade .35s ease; }
+@keyframes lbfade { from { opacity: .25; } to { opacity: 1; } }
+.lightbox.slideshow .lb-stage img.shown { animation-duration: .9s; }
+.lightbox.zoomed .lb-stage { cursor: grab; }
+.lightbox.zoomed .lb-stage:active { cursor: grabbing; }
+.lightbox.zoomed .lb-nav { display: none; }
+.lb-zoom {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); background: rgba(30,30,34,.85);
+  padding: 4px 10px; border-radius: 99px; font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; z-index: 2;
+}
+.ss-btn .ss-pause, #showBtn .ss-pause { display: none; }
+.lightbox.slideshow:not(.paused) .ss-btn .ss-play { display: none; }
+.lightbox.slideshow:not(.paused) .ss-btn .ss-pause { display: inline; }
+.ss-btn svg path, #showBtn svg path.ss-play { fill: currentColor; stroke: none; }
+.ss-btn svg path.ss-pause { fill: none; stroke: currentColor; stroke-width: 2.4; }
+.lightbox.slideshow .lb-nav { opacity: 0; }
+.lightbox.slideshow.idle { cursor: none; }
 #lbLive { pointer-events: none; }
 .lb-msg { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); background: rgba(30,30,34,.9); padding: 10px 16px; border-radius: 10px; font-size: 14px; }
 .lb-spinner { position: absolute; top: calc(50% - 16px); left: calc(50% - 16px); width: 32px; height: 32px; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
@@ -240,3 +269,26 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .no-fullscreen .fs-btn { display: none; }
 .lightbox:fullscreen { background: #000; }
 .lightbox.fs.idle { cursor: none; }
+
+/* ---------- view header: search chips, map ---------- */
+.view-head { padding-top: 16px; }
+.chips-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 11px; border-radius: 99px; background: var(--surface);
+  border: 1px solid var(--line); color: var(--text); text-decoration: none; font-size: 13px; max-width: 100%;
+}
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip small { color: var(--muted); font-size: 11.5px; }
+.chip em { font-style: normal; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.chip:hover { border-color: var(--accent); }
+.map { height: min(58vh, 560px); border-radius: var(--radius); overflow: hidden; background: var(--tile); position: relative; z-index: 0; }
+.map-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
+.map-pin img { width: 52px; height: 52px; object-fit: cover; border-radius: 10px; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); display: block; }
+.map-pin b {
+  position: absolute; top: -8px; right: -8px; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 99px;
+  background: var(--accent); color: #fff; font: 600 11px/22px system-ui, sans-serif; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+.leaflet-container { font: inherit; }
+.lb-info .muted { color: #a1a1ac; font-size: 12.5px; margin-top: 2px; }
+.card .trips .chip { align-items: center; flex-wrap: wrap; row-gap: 0; }
+.card .trips .chip span, .card .trips .chip small { white-space: normal; }
