@@ -29,6 +29,7 @@ library.
   people
 - Keyboard (← → Esc `i` Space `/`), swipe gestures, light and dark mode,
   English and German UI
+- **Installable as an app** in Chrome, Edge and on iOS/Android home screens
 - Optional HTTP Basic auth
 
 ## How it works
@@ -52,27 +53,63 @@ Tested with a library last opened by Photos on macOS 15 (data model 18600,
 ~57 000 items, 295 albums). Older Photos 5+ libraries (macOS 10.15 and later)
 should work. Reports for other versions are welcome.
 
-## Quick start
+## Installation
 
-### Docker
+The viewer is a small web server: it runs on one machine that can read the
+library, and you open it in a browser, on that machine or on any other device
+in your network. There is no separate desktop program, but Chrome and Edge can
+install it as an app (see below).
+
+Tested on Linux, with both Docker and Python. Windows and macOS should work
+the same way; reports are welcome.
+
+### Option A: Docker (server, NAS, any OS with Docker)
+
+No clone needed, Docker builds straight from GitHub:
 
 ```sh
-docker build -t photoslibrary-viewer .
-docker run -d --name photos -p 127.0.0.1:8395:8395 \
+docker build -t photoslibrary-viewer https://github.com/atlaxis-digital/photoslibrary-viewer.git
+docker run -d --name photos --restart unless-stopped -p 127.0.0.1:8395:8395 \
   -v "/path/to/My Library.photoslibrary:/library:ro" \
   -v photos-cache:/cache \
   -e PLV_TITLE="My Photos" \
   photoslibrary-viewer
 ```
 
-Open <http://127.0.0.1:8395>.
+Then open <http://127.0.0.1:8395>. To reach it from other devices, publish
+the port on your LAN address instead of `127.0.0.1` (and read
+[Security](#security)), or put it behind your reverse proxy.
 
-### Python (3.10+)
+### Option B: Python 3.10+ (also directly on Windows)
 
 ```sh
-pip install .
+pip install git+https://github.com/atlaxis-digital/photoslibrary-viewer
 photoslibrary-viewer "/path/to/My Library.photoslibrary" --cache ./cache
 ```
+
+On Windows (PowerShell), with the library copied to drive `D:`:
+
+```powershell
+py -m pip install git+https://github.com/atlaxis-digital/photoslibrary-viewer
+py -m photoslibrary_viewer "D:\My Library.photoslibrary" --cache "$env:LOCALAPPDATA\photoslibrary-viewer"
+```
+
+Then open <http://127.0.0.1:8395>. Use `--host 0.0.0.0` to allow other
+devices in your network. Without Git installed, download the ZIP from GitHub
+and run `pip install <unpacked folder>` instead.
+
+### Use it like an app
+
+- **Chrome / Edge (Windows, macOS, Linux, Android):** open the viewer and
+  click the install icon in the address bar, or use the menu entry
+  *Install app* (Chrome: *Cast, save and share → Install page as app*). It then
+  opens in its own window with its own icon in the taskbar or start menu.
+- **iPhone / iPad (Safari):** Share → *Add to Home Screen*.
+
+Browsers only offer installation on a secure connection: `http://127.0.0.1`
+or `http://localhost` work as they are; from another device you need HTTPS with
+a certificate the device trusts (e.g. a reverse proxy with Let's Encrypt or a
+local CA such as [mkcert](https://github.com/FiloSottile/mkcert)).
 
 ### Where should the library live?
 
@@ -81,7 +118,7 @@ Windows cannot read Mac-formatted (APFS/HFS+) drives. Common setups:
 - **Server or NAS** (recommended): keep a copy of the library on a Linux
   server or NAS, run the viewer there and open it from any device.
 - **Directly on Windows**: copy the library to an NTFS/exFAT drive or a
-  network share, then run the Python version on Windows.
+  network share, then use option B on Windows.
 
 Don't let Photos on the Mac open a library that sits on a network share. Apple
 doesn't support that and it can corrupt the library. Treat the copy the viewer

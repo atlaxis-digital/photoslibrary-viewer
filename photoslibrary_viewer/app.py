@@ -287,6 +287,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --------------------------------------------------------------- static
 
+    @app.get("/manifest.webmanifest")
+    def manifest() -> JSONResponse:
+        """Makes the viewer installable as an app (Chrome/Edge: "Install app")."""
+        name = settings.title or (
+            library.path.stem if library.path.suffix == ".photoslibrary" else "Photos"
+        )
+        icons = [
+            {"src": f"static/icons/icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
+            for n in (192, 512)
+        ] + [
+            {"src": f"static/icons/maskable-{n}.png", "sizes": f"{n}x{n}",
+             "type": "image/png", "purpose": "maskable"}
+            for n in (192, 512)
+        ]
+        return JSONResponse(
+            {
+                "name": name,
+                "short_name": name[:24],
+                "description": "Photos library viewer (read-only)",
+                "id": "./",
+                "start_url": "./",
+                "scope": "./",
+                "display": "standalone",
+                "background_color": "#141417",
+                "theme_color": "#1d1d22",
+                "icons": icons,
+            },
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.get("/")
     def index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
